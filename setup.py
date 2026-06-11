@@ -7,7 +7,7 @@ setup(
     description="Professional .git repository reconstructor and extractor",
     long_description=open("README.md").read(),
     long_description_content_type="text/markdown",
-    url="https://github.com/Baba01hacker666/gitsnatcher",
+    url="https://github.com/baba01hacker/gitsnatcher",
     packages=find_packages(),
     install_requires=[
         "requests",
