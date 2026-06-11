@@ -3,11 +3,11 @@ from setuptools import setup, find_packages
 setup(
     name="gitsnatcher",
     version="1.0.0",
-    author="baba01hacker",
+    author="Baba01hacker666",
     description="Professional .git repository reconstructor and extractor",
     long_description=open("README.md").read(),
     long_description_content_type="text/markdown",
-    url="https://github.com/baba01hacker/gitsnatcher",
+    url="https://github.com/Baba01hacker666/gitsnatcher",
     packages=find_packages(),
     install_requires=[
         "requests",

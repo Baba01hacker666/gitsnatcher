@@ -31,7 +31,7 @@ BANNER = r"""
   \____|_|\__|___/_| |_|\__,_|\__\___|_| |_|\___|_|   
                                                       
     .git Directory Reconstructor & Extractor
-    Made by baba01hacker
+    Made by Baba01hacker666
 """
 
 class GitSnatcher:
@@ -192,7 +192,7 @@ class GitSnatcher:
         return list(hashes)
 
     def run(self):
-        print(Colors.OKCYAN + BANNER.replace("baba01hacker", f"{Colors.BOLD}baba01hacker{Colors.ENDC}{Colors.OKCYAN}") + Colors.ENDC)
+        print(Colors.OKCYAN + BANNER.replace("baba01hacker", f"{Colors.BOLD}Baba01hacker666{Colors.ENDC}{Colors.OKCYAN}") + Colors.ENDC)
         self.print_msg("info", f"Target: {Colors.BOLD}{self.base_url}{Colors.ENDC}")
         self.print_msg("info", f"Threads: {self.threads} | Timeout: {self.timeout}s")
         os.makedirs(self.out_dir, exist_ok=True)

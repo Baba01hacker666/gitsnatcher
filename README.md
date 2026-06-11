@@ -1,11 +1,11 @@
 # GitSnatcher
 
-![GitSnatcher](https://img.shields.io/badge/Made%20by-baba01hacker-blue)
+![GitSnatcher](https://img.shields.io/badge/Made%20by-Baba01hacker666-blue)
 ![Python](https://img.shields.io/badge/Python-3.6%2B-green)
 
 **GitSnatcher** is a professional-grade `.git` directory reconstructor and extractor. It recovers exposed git repositories from web servers, intelligently crawling and decompressing packfiles and index structures even when directory listing is disabled or partial objects return 403 Forbidden.
 
-Made by **baba01hacker**.
+Made by **Baba01hacker666**.
 
 ## Features
 - **Smart Reconstruction:** Recursively parses git indexes and tree structures to pull objects dynamically.
@@ -19,7 +19,7 @@ pip install gitsnatcher
 ```
 Or from source:
 ```bash
-git clone https://github.com/baba01hacker/gitsnatcher.git
+git clone https://github.com/Baba01hacker666/gitsnatcher.git
 cd gitsnatcher
 pip install .
 ```
