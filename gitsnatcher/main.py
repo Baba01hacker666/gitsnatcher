@@ -47,6 +47,7 @@ class GitSnatcher:
         self.threads = args.threads
         self.timeout = args.timeout
         self.delay = args.delay
+        self.max_retries = getattr(args, 'retries', 3)
         self.verify_ssl = not args.insecure
         self.proxies = {"http": args.proxy, "https": args.proxy} if args.proxy else None
         
@@ -73,7 +74,8 @@ class GitSnatcher:
             'HEAD', 'config', 'description', 'info/exclude',
             'info/refs', 'logs/HEAD', 'logs/refs/heads/master',
             'logs/refs/heads/main', 'refs/heads/master', 'refs/heads/main',
-            'refs/stash', 'index', 'packed-refs', 'objects/info/packs'
+            'refs/stash', 'index', 'packed-refs', 'objects/info/packs',
+            'objects/info/alternates', 'shallow',
         ]
 
     def print_msg(self, level, msg):
@@ -94,54 +96,83 @@ class GitSnatcher:
             if path in self.downloaded:
                 return None
             self.downloaded.add(path)
-            
-        if self.delay > 0:
-            time.sleep(self.delay)
-            
+
         url = urljoin(self.base_url, path)
         out_path = os.path.join(self.out_dir, path)
-        
-        try:
-            resp = self.session.get(url, timeout=self.timeout, verify=self.verify_ssl, allow_redirects=False)
-            if resp.status_code != 200:
-                return None
-                
-            data = resp.content
-            if b'<html' in data[:100].lower() or b'<body' in data[:100].lower():
-                # Server returned a 200 OK but it's a soft 404 or block page
-                return None
-                
-            os.makedirs(os.path.dirname(out_path), exist_ok=True)
-            with open(out_path, 'wb') as f:
-                f.write(data)
-                
-            with self.lock:
-                self.total_extracted += 1
-                self.print_msg("status", f"Extracted: {self.total_extracted} files | Objects in queue: {len(self.queue)} | Last fetched: {path[:40]}")
-                
-            return data
-            
-        except requests.exceptions.RequestException:
-            return None
+
+        last_error = None
+        for attempt in range(self.max_retries):
+            if attempt > 0:
+                backoff = min(2 ** attempt, 8)
+                time.sleep(backoff)
+
+            if self.delay > 0:
+                time.sleep(self.delay)
+
+            try:
+                resp = self.session.get(url, timeout=self.timeout, verify=self.verify_ssl,
+                                        allow_redirects=False)
+                if resp.status_code == 429:
+                    retry_after = resp.headers.get('Retry-After', '5')
+                    try:
+                        time.sleep(float(retry_after))
+                    except ValueError:
+                        time.sleep(5)
+                    continue
+
+                if resp.status_code != 200:
+                    last_error = f"HTTP {resp.status_code}"
+                    continue
+
+                data = resp.content
+                # Filter out HTML responses (soft 404s, block pages, directory listings)
+                if data and (b'<html' in data[:200].lower() or b'<!doctype' in data[:200].lower()):
+                    return None
+
+                os.makedirs(os.path.dirname(out_path), exist_ok=True)
+                with open(out_path, 'wb') as f:
+                    f.write(data)
+
+                with self.lock:
+                    self.total_extracted += 1
+                    self.print_msg("status",
+                        f"Extracted: {self.total_extracted} | Queue: {len(self.queue)} | {path[:50]}")
+
+                return data
+
+            except requests.exceptions.RequestException as e:
+                last_error = str(e)[:80]
+                continue
+
+        return None
 
     def get_object_path(self, sha1):
         return f"objects/{sha1[:2]}/{sha1[2:]}"
 
-    def parse_object(self, data):
+    def parse_object(self, data, obj_type_hint=None):
         try:
             decompressed = zlib.decompress(data)
         except zlib.error:
             return []
-            
+
         hashes = set()
-        matches = re.findall(b'[0-9a-f]{40}', decompressed)
-        for match in matches:
-            hashes.add(match.decode('ascii'))
-            
-        tree_pattern = re.compile(b'(?:100644|100755|40000|120000|160000) [^\x00]+\x00(.{20})', re.DOTALL)
+
+        # Extract hashes from tree objects with proper binary parsing.
+        # Git tree modes: 040000 (tree), 100644 (blob), 100755 (executable),
+        # 120000 (symlink), 160000 (commit/submodule), 40000 (tree - old style).
+        # Format per entry: "<mode> <name>\x00<20-byte sha1>"
+        tree_pattern = re.compile(
+            b'(?:100644|100755|040000|40000|120000|160000) [^\x00]+\x00(.{20})'
+        )
         for match in tree_pattern.findall(decompressed):
             hashes.add(match.hex())
-            
+
+        # Fallback: scan for 40-char hex strings (useful for tag/commit objects).
+        if not hashes:
+            matches = re.findall(b'[0-9a-f]{40}', decompressed)
+            for match in matches:
+                hashes.add(match.decode('ascii'))
+
         return list(hashes)
 
     def extract_hashes_from_text(self, data):
@@ -191,23 +222,163 @@ class GitSnatcher:
             
         return list(hashes)
 
+    def parse_pack_index(self, data):
+        """Parse a .idx file (v1 or v2) and return all object SHA1 hashes."""
+        hashes = []
+        if len(data) < 8:
+            return hashes
+
+        # v2 magic: \xff\x74\x4f\x63
+        if data[:4] == b'\xfftOc':
+            version = struct.unpack('>I', data[4:8])[0]
+            if version != 2:
+                return hashes
+
+            # Fanout table: 256 × 4-byte big-endian counts
+            fanout = struct.unpack('>256I', data[8:1032])
+            obj_count = fanout[255]
+
+            sha1_start = 1032
+            sha1_end = sha1_start + obj_count * 20
+            if sha1_end > len(data):
+                return hashes
+
+            for i in range(obj_count):
+                offset = sha1_start + i * 20
+                hashes.append(data[offset:offset + 20].hex())
+
+        else:
+            # v1 format: fanout table starts at offset 0 (no header)
+            fanout = struct.unpack('>256I', data[0:1024])
+            obj_count = fanout[255]
+
+            sha1_start = 1024 + obj_count * 4  # skip 4-byte offsets (v1)
+            sha1_end = sha1_start + obj_count * 20
+            if sha1_end > len(data):
+                return hashes
+
+            for i in range(obj_count):
+                offset = sha1_start + i * 20
+                hashes.append(data[offset:offset + 20].hex())
+
+        return hashes
+
+    def parse_packed_refs(self, data):
+        """Parse packed-refs content and return ref -> sha1 mappings."""
+        refs = {}
+        for line in data.split(b'\n'):
+            line = line.strip()
+            if not line or line.startswith(b'#') or line.startswith(b'^'):
+                continue
+            parts = line.split(b' ', 1)
+            if len(parts) == 2 and len(parts[0]) == 40:
+                sha1 = parts[0].decode('ascii')
+                ref_name = parts[1].decode('ascii')
+                refs[ref_name] = sha1
+        return refs
+
     def run(self):
         print(Colors.OKCYAN + BANNER.replace("baba01hacker", f"{Colors.BOLD}baba01hacker{Colors.ENDC}{Colors.OKCYAN}") + Colors.ENDC)
         self.print_msg("info", f"Target: {Colors.BOLD}{self.base_url}{Colors.ENDC}")
-        self.print_msg("info", f"Threads: {self.threads} | Timeout: {self.timeout}s")
+        self.print_msg("info", f"Threads: {self.threads} | Timeout: {self.timeout}s | Retries: {self.max_retries}")
         os.makedirs(self.out_dir, exist_ok=True)
-        
+
         print("-" * 50)
-        self.print_msg("info", "Phase 1: Downloading initial config and indices...")
-        
-        for path in self.initial_files:
+        self.print_msg("info", "Phase 1: Enumerating repository structure...")
+
+        # Step 1: Download HEAD first to determine default branch
+        head_data = self.download_file('HEAD')
+        default_branch = None
+        if head_data:
+            head_text = head_data.decode('utf-8', errors='ignore').strip()
+            if head_text.startswith('ref: '):
+                default_branch = head_text[5:].strip()
+                self.print_msg("info", f"HEAD → {default_branch}")
+
+        # Build dynamic initial file list
+        dynamic_files = list(self.initial_files)
+        if default_branch:
+            dynamic_files.extend([
+                default_branch,
+                f"logs/{default_branch}",
+            ])
+
+        # Try common alternative branches if no HEAD or detached
+        for branch in ('refs/heads/master', 'refs/heads/main', 'refs/heads/develop',
+                       'refs/heads/dev', 'refs/heads/staging'):
+            if branch not in dynamic_files:
+                dynamic_files.append(branch)
+
+        for path in dynamic_files:
+            if path in self.downloaded:
+                continue
             data = self.download_file(path)
-            if data:
-                if path == 'index':
-                    new_hashes = self.parse_index(data)
-                    self.queue.update(new_hashes)
-                new_hashes = self.extract_hashes_from_text(data)
+            if not data:
+                continue
+
+            if path == 'index':
+                new_hashes = self.parse_index(data)
                 self.queue.update(new_hashes)
+                continue
+
+            if path == 'packed-refs':
+                refs = self.parse_packed_refs(data)
+                for ref_name, sha1 in refs.items():
+                    self.queue.add(sha1)
+                    # Also download the ref file itself
+                    self.download_file(ref_name)
+                self.print_msg("info", f"packed-refs: {len(refs)} refs discovered")
+                continue
+
+            if path.endswith('.idx'):
+                hashes = self.parse_pack_index(data)
+                self.queue.update(hashes)
+                # Also grab the corresponding .pack file
+                pack_path = path.replace('.idx', '.pack')
+                self.download_file(pack_path)
+                self.print_msg("success", f"Pack index parsed: {len(hashes)} objects from {path}")
+                continue
+
+            if path == 'objects/info/packs':
+                # Parse packs listing to find .idx files
+                try:
+                    text = data.decode('utf-8', errors='ignore')
+                    for line in text.splitlines():
+                        line = line.strip()
+                        if line and not line.startswith('#') and line.endswith('.pack'):
+                            idx_path = line.replace('.pack', '.idx')
+                            pack_path = f"objects/pack/{idx_path}" if '/' not in line else line.replace('.pack', '.idx')
+                            # Try both packed path and loose objects/pack path
+                            idx_data = self.download_file(pack_path)
+                            if idx_data:
+                                hashes = self.parse_pack_index(idx_data)
+                                self.queue.update(hashes)
+                                self.download_file(pack_path.replace('.idx', '.pack'))
+                                self.print_msg("success", f"Pack: {len(hashes)} objects from {pack_path}")
+                except Exception:
+                    pass
+                continue
+
+            if path == 'objects/info/alternates':
+                try:
+                    text = data.decode('utf-8', errors='ignore')
+                    for line in text.splitlines():
+                        line = line.strip()
+                        if line and not line.startswith('#'):
+                            self.print_msg("warning", f"Alternate object DB: {line}")
+                except Exception:
+                    pass
+                continue
+
+            if path == 'shallow':
+                hashes = self.extract_hashes_from_text(data)
+                self.queue.update(hashes)
+                self.print_msg("info", f"Shallow repo: {len(hashes)} boundary commits")
+                continue
+
+            # Generic text-based hash extraction for everything else
+            new_hashes = self.extract_hashes_from_text(data)
+            self.queue.update(new_hashes)
 
         print("\n" + "-" * 50)
         self.print_msg("info", f"Phase 2: Recursively fetching {len(self.queue)} discovered objects...")
@@ -216,14 +387,14 @@ class GitSnatcher:
             while self.queue:
                 current_batch = list(self.queue)
                 self.queue.clear()
-                
+
                 futures = {}
                 for sha1 in current_batch:
                     obj_path = self.get_object_path(sha1)
                     with self.lock:
                         if obj_path not in self.downloaded:
                             futures[executor.submit(self.download_file, obj_path)] = sha1
-                        
+
                 for future in as_completed(futures):
                     sha1 = futures[future]
                     data = future.result()
@@ -249,6 +420,7 @@ def main():
     perf_group.add_argument("-t", "--threads", type=int, default=10, help="Number of concurrent threads (default: 10)")
     perf_group.add_argument("--delay", type=float, default=0, help="Delay between requests in seconds")
     perf_group.add_argument("--timeout", type=int, default=10, help="Connection timeout in seconds")
+    perf_group.add_argument("--retries", type=int, default=3, help="Max retries per failed request (default: 3)")
     
     net_group = parser.add_argument_group("Network & Evasion Options")
     net_group.add_argument("-x", "--proxy", help="HTTP/HTTPS proxy (e.g. http://127.0.0.1:8080)")
