@@ -1,0 +1,11 @@
+README.md
+setup.py
+gitsnatcher/__init__.py
+gitsnatcher/main.py
+gitsnatcher.egg-info/PKG-INFO
+gitsnatcher.egg-info/SOURCES.txt
+gitsnatcher.egg-info/dependency_links.txt
+gitsnatcher.egg-info/entry_points.txt
+gitsnatcher.egg-info/requires.txt
+gitsnatcher.egg-info/top_level.txt
+tests/test_gitsnatcher.py
