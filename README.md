@@ -6,7 +6,7 @@
 [![Version](https://img.shields.io/badge/Version-2.0.0-orange.svg)](https://github.com/Baba01hacker666/gitsnatcher)
 
 **GitSnatcher** is a high-performance, professional-grade `.git` directory reconstructor, source code extractor, and intelligence analyzer. It recovers exposed git repositories from web servers, intelligently crawling and decompressing packfiles, index structures, reflogs, and commit DAGs—even when directory listing is disabled, loose objects return 403 Forbidden, or servers employ WAF rate limiting.
-
+MADE WITH LOVE BY BABA01HACKER
 ---
 
 ## Key Features
